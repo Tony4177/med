@@ -1,133 +1,126 @@
 import streamlit as st
 import json
 import os
-import threading
 import time
 from datetime import datetime
-
-try:
-    from plyer import notification
-except ImportError:
-    notification = None
+from streamlit_js_eval import streamlit_js_eval
+from streamlit_autorefresh import st_autorefresh
 
 DATA_FILE = "reminders.json"
+
+# --- HEARTBEAT: Checks every 30 seconds ---
+st_autorefresh(interval=30000, key="checker")
 
 # ---------- Utility Functions ----------
 
 def load_reminders():
     if not os.path.exists(DATA_FILE):
         return []
-    with open(DATA_FILE, "r") as f:
-        return json.load(f)
+    try:
+        with open(DATA_FILE, "r") as f:
+            return json.load(f)
+    except:
+        return []
 
 def save_reminders(reminders):
     with open(DATA_FILE, "w") as f:
         json.dump(reminders, f, indent=4)
 
-# ---------- Notification Thread ----------
+def notify_browser(title, message):
+    """Sends a real push notification to the user's desktop/phone browser."""
+    js_code = f"""
+    if (Notification.permission === 'granted') {{
+        new Notification("{title}", {{
+            body: "{message}",
+            icon: "https://cdn-icons-png.flaticon.com/512/822/822143.png"
+        }});
+    }} else {{
+        Notification.requestPermission();
+    }}
+    """
+    streamlit_js_eval(js_expressions=js_code)
 
-def check_reminders():
-    while True:
-        if os.path.exists(DATA_FILE) and notification is not None:
-            try:
-                with open(DATA_FILE, "r") as f:
-                    reminders = json.load(f)
-                
-                modified = False
-                now = datetime.now()
-                
-                for r in reminders:
-                    if not r.get("notified", False):
-                        try:
-                            # Parse "YYYY-MM-DD HH:MM:SS"
-                            rem_time = datetime.fromisoformat(str(r["datetime"]))
-                            if now >= rem_time:
-                                notification.notify(
-                                    title=f"Medical Reminder: {r['name']}",
-                                    message=f"Take {r['medicine']} ({r['dosage']})\nTime: {r['datetime']}",
-                                    app_name="Medical Reminder",
-                                    timeout=10
-                                )
-                                r["notified"] = True
-                                modified = True
-                        except Exception as e:
-                            print(f"Error processing reminder runtime: {e}")
-                
-                if modified:
-                    with open(DATA_FILE, "w") as f:
-                        json.dump(reminders, f, indent=4)
-            except Exception as e:
-                print(f"Background thread error: {e}")
-        
-        time.sleep(10)  # Check every 10 seconds
-
-@st.cache_resource
-def start_thread():
-    t = threading.Thread(target=check_reminders, daemon=True)
-    t.start()
-    return t
-
-if notification is not None:
-    start_thread()
-else:
-    st.warning("The 'plyer' library is not installed. Desktop notifications will not work. Please install it with 'pip install plyer'.")
-
-# ---------- App UI ----------
+# ---------- App Configuration ----------
 
 st.set_page_config(page_title="Medical Reminder System", page_icon="💊")
 
-st.title("💊 Medical Reminder System")
-st.write("Simple medication reminder app built with Streamlit")
+# Initial permission request
+streamlit_js_eval(js_expressions="Notification.requestPermission()")
 
-menu = st.sidebar.selectbox("Menu", ["Add Reminder", "View Reminders"])
+st.title("💊 Medical Reminder System")
+
+# Sidebar Test Button
+if st.sidebar.button("🔔 Test Push Notification"):
+    notify_browser("Test Alert", "If you see this, your notifications are working!")
 
 reminders = load_reminders()
 
-# ---------- Add Reminder ----------
+# ---------- BACKGROUND CHECKER ----------
+now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+modified = False
+
+for r in reminders:
+    # Match Date and Time exactly (to the minute)
+    if r['datetime'] == now_str and not r.get("notified", False):
+        notify_browser(
+            f"Medicine Alert: {r['name']}", 
+            f"It is time to take {r['dosage']} of {r['medicine']}"
+        )
+        r["notified"] = True
+        modified = True
+        st.toast(f"Notification triggered for {r['medicine']}!", icon="🔔")
+
+if modified:
+    save_reminders(reminders)
+
+# ---------- Menu Selection ----------
+menu = st.sidebar.selectbox("Menu", ["Add Reminder", "View Reminders"])
 
 if menu == "Add Reminder":
     st.subheader("Add New Reminder")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        name = st.text_input("Patient Name")
+        medicine = st.text_input("Medicine Name")
+    with col2:
+        dosage = st.text_input("Dosage (e.g., 2 pills)")
+        
+    st.write("---")
+    st.write("### Set Reminder Time")
+    rem_date = st.date_input("Select Date", datetime.now())
+    rem_time = st.time_input("Select Exact Time") # User can set ANY time here
 
-    name = st.text_input("Patient Name")
-    medicine = st.text_input("Medicine Name")
-    dosage = st.text_input("Dosage (e.g., 1 tablet)")
-    date = st.date_input("Date")
-    time = st.time_input("Time")
-
-    if st.button("Add Reminder"):
+    if st.button("Save Reminder"):
         if name and medicine and dosage:
-            reminder = {
-                "id": len(reminders) + 1,
+            # Combine date and time into the matching format
+            dt_string = f"{rem_date} {rem_time.strftime('%H:%M')}"
+            
+            new_reminder = {
+                "id": int(time.time()),
                 "name": name,
                 "medicine": medicine,
                 "dosage": dosage,
-                "datetime": f"{date} {time}"
+                "datetime": dt_string,
+                "notified": False
             }
-
-            reminders.append(reminder)
+            reminders.append(new_reminder)
             save_reminders(reminders)
-            st.success("Reminder added successfully!")
+            st.success(f"Reminder set for {medicine} at {dt_string}")
         else:
-            st.error("Please fill all fields.")
-
-# ---------- View Reminders ----------
+            st.error("Please fill in all details.")
 
 elif menu == "View Reminders":
-    st.subheader("All Reminders")
-
+    st.subheader("Schedule")
     if not reminders:
-        st.info("No reminders added yet.")
+        st.info("No reminders scheduled.")
     else:
         for reminder in reminders:
-            st.markdown(f"""
-            ### 🧑 {reminder['name']}
-            - 💊 Medicine: {reminder['medicine']}
-            - 🧾 Dosage: {reminder['dosage']}
-            - ⏰ Date & Time: {reminder['datetime']}
-            """)
-
-            if st.button(f"Delete {reminder['id']}"):
-                reminders = [r for r in reminders if r["id"] != reminder["id"]]
-                save_reminders(reminders)
-                st.warning("Reminder deleted.")
-                st.experimental_rerun()
+            status = "✅ Done" if reminder.get("notified") else "⏳ Waiting"
+            with st.expander(f"{reminder['datetime']} - {reminder['medicine']} ({status})"):
+                st.write(f"**Patient:** {reminder['name']}")
+                st.write(f"**Dosage:** {reminder['dosage']}")
+                if st.button("Delete", key=f"del_{reminder['id']}"):
+                    reminders = [r for r in reminders if r["id"] != reminder["id"]]
+                    save_reminders(reminders)
+                    st.rerun()
