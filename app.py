@@ -1,131 +1,126 @@
 import streamlit as st
-import pandas as pd
+import json
+import os
+import time
 from datetime import datetime
+from streamlit_js_eval import streamlit_js_eval
+from streamlit_autorefresh import st_autorefresh
 
-st.set_page_config(page_title="Smart Medicine Reminder", layout="wide")
+DATA_FILE = "reminders.json"
 
-# ----------------------------
-# Session Storage
-# ----------------------------
-if "medicines" not in st.session_state:
-    st.session_state.medicines = []
+# --- HEARTBEAT: Checks every 30 seconds ---
+st_autorefresh(interval=30000, key="checker")
 
-if "logs" not in st.session_state:
-    st.session_state.logs = []
+# ---------- Utility Functions ----------
 
-# ----------------------------
-# Add Medicine Section
-# ----------------------------
-st.title("💊 Smart Medicine Reminder System")
+def load_reminders():
+    if not os.path.exists(DATA_FILE):
+        return []
+    try:
+        with open(DATA_FILE, "r") as f:
+            return json.load(f)
+    except:
+        return []
 
-st.header("Add Medicine")
+def save_reminders(reminders):
+    with open(DATA_FILE, "w") as f:
+        json.dump(reminders, f, indent=4)
 
-name = st.text_input("Medicine Name")
-dosage = st.text_input("Dosage")
-time = st.time_input("Medicine Time")
-total_pills = st.number_input("Total Pills", min_value=1)
-
-if st.button("Add Medicine"):
-    st.session_state.medicines.append({
-        "name": name,
-        "dosage": dosage,
-        "time": time,
-        "pills": total_pills
-    })
-    st.success("Medicine Added Successfully!")
-
-# ----------------------------
-# Dashboard
-# ----------------------------
-st.header("📊 Dashboard")
-
-taken_count = 0
-total_count = len(st.session_state.logs)
-
-for med in st.session_state.medicines:
-    st.subheader(med["name"])
-    st.write(f"Dosage: {med['dosage']}")
-    st.write(f"Time: {med['time']}")
-    st.write(f"Pills Left: {med['pills']}")
-
-    col1, col2 = st.columns(2)
-
-    if col1.button(f"Taken - {med['name']}"):
-        med["pills"] -= 1
-        st.session_state.logs.append({"medicine": med["name"], "status": "Taken"})
-        taken_count += 1
-        st.success("Marked as Taken")
-
-    if col2.button(f"Missed - {med['name']}"):
-        st.session_state.logs.append({"medicine": med["name"], "status": "Missed"})
-        st.warning("Marked as Missed")
-
-    # Refill Alert
-    if med["pills"] <= 2:
-        st.error("⚠ Low Stock! Please Refill")
-
-# ----------------------------
-# Adherence Calculation
-# ----------------------------
-taken_count = len([log for log in st.session_state.logs if log["status"] == "Taken"])
-total_count = len(st.session_state.logs)
-
-if total_count > 0:
-    adherence = (taken_count / total_count) * 100
-else:
-    adherence = 0
-
-st.header("📈 Adherence Report")
-st.write(f"Adherence: {adherence:.2f}%")
-st.progress(adherence / 100)
-
-# ----------------------------
-# AI Risk Score (Simulated)
-# ----------------------------
-if adherence < 60:
-    risk = "🔴 High Risk"
-elif adherence < 85:
-    risk = "🟡 Medium Risk"
-else:
-    risk = "🟢 Low Risk"
-
-st.write("AI Risk Level:", risk)
-
-# ----------------------------
-# AI Weekly Summary (Auto Generated)
-# ----------------------------
-st.header("🧠 AI Weekly Summary")
-
-if total_count > 0:
-    summary = f"""
-    This week adherence is {adherence:.2f}%.
-    Total doses: {total_count}.
-    Missed doses: {total_count - taken_count}.
-    Risk Level: {risk}.
+def notify_browser(title, message):
+    """Sends a real push notification to the user's desktop/phone browser."""
+    js_code = f"""
+    if (Notification.permission === 'granted') {{
+        new Notification("{title}", {{
+            body: "{message}",
+            icon: "https://cdn-icons-png.flaticon.com/512/822/822143.png"
+        }});
+    }} else {{
+        Notification.requestPermission();
+    }}
     """
-    st.info(summary)
-else:
-    st.write("No data available yet.")
+    streamlit_js_eval(js_expressions=js_code)
 
-# ----------------------------
-# Caregiver Alert Simulation
-# ----------------------------
-missed_count = len([log for log in st.session_state.logs if log["status"] == "Missed"])
+# ---------- App Configuration ----------
 
-if missed_count >= 3:
-    st.error("🚨 Caregiver Alert Triggered! (Simulated Notification)")
+st.set_page_config(page_title="Medical Reminder System", page_icon="💊")
 
-# ----------------------------
-# Chat Assistant (Basic)
-# ----------------------------
-st.header("🤖 AI Health Assistant")
+# Initial permission request
+streamlit_js_eval(js_expressions="Notification.requestPermission()")
 
-question = st.text_input("Ask something like: What is my adherence?")
+st.title("💊 Medical Reminder System")
 
-if question:
-    if "adherence" in question.lower():
-        st.write(f"Your adherence is {adherence:.2f}%")
-    elif "missed" in question.lower():
-        st.write(f"You missed {total_count - taken_count} doses.")
+# Sidebar Test Button
+if st.sidebar.button("🔔 Test Push Notification"):
+    notify_browser("Test Alert", "If you see this, your notifications are working!")
+
+reminders = load_reminders()
+
+# ---------- BACKGROUND CHECKER ----------
+now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+modified = False
+
+for r in reminders:
+    # Match Date and Time exactly (to the minute)
+    if r['datetime'] == now_str and not r.get("notified", False):
+        notify_browser(
+            f"Medicine Alert: {r['name']}", 
+            f"It is time to take {r['dosage']} of {r['medicine']}"
+        )
+        r["notified"] = True
+        modified = True
+        st.toast(f"Notification triggered for {r['medicine']}!", icon="🔔")
+
+if modified:
+    save_reminders(reminders)
+
+# ---------- Menu Selection ----------
+menu = st.sidebar.selectbox("Menu", ["Add Reminder", "View Reminders"])
+
+if menu == "Add Reminder":
+    st.subheader("Add New Reminder")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        name = st.text_input("Patient Name")
+        medicine = st.text_input("Medicine Name")
+    with col2:
+        dosage = st.text_input("Dosage (e.g., 2 pills)")
+        
+    st.write("---")
+    st.write("### Set Reminder Time")
+    rem_date = st.date_input("Select Date", datetime.now())
+    rem_time = st.time_input("Select Exact Time") # User can set ANY time here
+
+    if st.button("Save Reminder"):
+        if name and medicine and dosage:
+            # Combine date and time into the matching format
+            dt_string = f"{rem_date} {rem_time.strftime('%H:%M')}"
+            
+            new_reminder = {
+                "id": int(time.time()),
+                "name": name,
+                "medicine": medicine,
+                "dosage": dosage,
+                "datetime": dt_string,
+                "notified": False
+            }
+            reminders.append(new_reminder)
+            save_reminders(reminders)
+            st.success(f"Reminder set for {medicine} at {dt_string}")
+        else:
+            st.error("Please fill in all details.")
+
+elif menu == "View Reminders":
+    st.subheader("Schedule")
+    if not reminders:
+        st.info("No reminders scheduled.")
     else:
-        st.write("I can answer about adherence and missed doses.")
+        for reminder in reminders:
+            status = "✅ Done" if reminder.get("notified") else "⏳ Waiting"
+            with st.expander(f"{reminder['datetime']} - {reminder['medicine']} ({status})"):
+                st.write(f"**Patient:** {reminder['name']}")
+                st.write(f"**Dosage:** {reminder['dosage']}")
+                if st.button("Delete", key=f"del_{reminder['id']}"):
+                    reminders = [r for r in reminders if r["id"] != reminder["id"]]
+                    save_reminders(reminders)
+                    st.rerun()
