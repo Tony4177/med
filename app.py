@@ -1,14 +1,16 @@
 import streamlit as st
 import json
 import os
+import threading
+import time
 from datetime import datetime
-from streamlit_js_eval import streamlit_js_eval
-from streamlit_autorefresh import st_autorefresh
+
+try:
+    from plyer import notification
+except ImportError:
+    notification = None
 
 DATA_FILE = "reminders.json"
-
-# --- AUTO-REFRESH (Checks every 30 seconds) ---
-st_autorefresh(interval=30000, key="datacheck")
 
 # ---------- Utility Functions ----------
 
@@ -22,51 +24,75 @@ def save_reminders(reminders):
     with open(DATA_FILE, "w") as f:
         json.dump(reminders, f, indent=4)
 
-def trigger_notification(name, med, dosage):
-    """Sends a browser-level push notification."""
-    js_code = f"""
-    if (Notification.permission === 'granted') {{
-        new Notification('MEDICINE ALERT: {name}', {{
-            body: 'Time to take {dosage} of {med}!',
-            icon: 'https://cdn-icons-png.flaticon.com/512/822/822143.png'
-        }});
-    }} else if (Notification.permission !== 'denied') {{
-        Notification.requestPermission();
-    }}
-    """
-    streamlit_js_eval(js_expressions=js_code)
+# ---------- Notification Thread ----------
+
+def check_reminders():
+    while True:
+        if os.path.exists(DATA_FILE) and notification is not None:
+            try:
+                with open(DATA_FILE, "r") as f:
+                    reminders = json.load(f)
+                
+                modified = False
+                now = datetime.now()
+                
+                for r in reminders:
+                    if not r.get("notified", False):
+                        try:
+                            # Parse "YYYY-MM-DD HH:MM:SS"
+                            rem_time = datetime.fromisoformat(str(r["datetime"]))
+                            if now >= rem_time:
+                                notification.notify(
+                                    title=f"Medical Reminder: {r['name']}",
+                                    message=f"Take {r['medicine']} ({r['dosage']})\nTime: {r['datetime']}",
+                                    app_name="Medical Reminder",
+                                    timeout=10
+                                )
+                                r["notified"] = True
+                                modified = True
+                        except Exception as e:
+                            print(f"Error processing reminder runtime: {e}")
+                
+                if modified:
+                    with open(DATA_FILE, "w") as f:
+                        json.dump(reminders, f, indent=4)
+            except Exception as e:
+                print(f"Background thread error: {e}")
+        
+        time.sleep(10)  # Check every 10 seconds
+
+@st.cache_resource
+def start_thread():
+    t = threading.Thread(target=check_reminders, daemon=True)
+    t.start()
+    return t
+
+if notification is not None:
+    start_thread()
+else:
+    st.warning("The 'plyer' library is not installed. Desktop notifications will not work. Please install it with 'pip install plyer'.")
 
 # ---------- App UI ----------
 
 st.set_page_config(page_title="Medical Reminder System", page_icon="💊")
 
-# Request permission on app load
-streamlit_js_eval(js_expressions="Notification.requestPermission()")
-
 st.title("💊 Medical Reminder System")
-
-# --- BACKGROUND CHECKER ---
-# This part scans your JSON and fires a notification if the time matches
-reminders = load_reminders()
-now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-
-for r in reminders:
-    # We strip the seconds for a clean match on the minute
-    if r['datetime'][:16] == now_str:
-        trigger_notification(r['name'], r['medicine'], r['dosage'])
-        st.toast(f"🚨 ALERT: {r['medicine']} for {r['name']}", icon="🔔")
+st.write("Simple medication reminder app built with Streamlit")
 
 menu = st.sidebar.selectbox("Menu", ["Add Reminder", "View Reminders"])
+
+reminders = load_reminders()
 
 # ---------- Add Reminder ----------
 
 if menu == "Add Reminder":
     st.subheader("Add New Reminder")
+
     name = st.text_input("Patient Name")
     medicine = st.text_input("Medicine Name")
     dosage = st.text_input("Dosage (e.g., 1 tablet)")
     date = st.date_input("Date")
-    time_val = st.time_input("Time")
+    time = st.time_input("Time")
 
     if st.button("Add Reminder"):
         if name and medicine and dosage:
@@ -75,8 +101,9 @@ if menu == "Add Reminder":
                 "name": name,
                 "medicine": medicine,
                 "dosage": dosage,
-                "datetime": f"{date} {time_val}"
+                "datetime": f"{date} {time}"
             }
+
             reminders.append(reminder)
             save_reminders(reminders)
             st.success("Reminder added successfully!")
@@ -87,15 +114,20 @@ if menu == "Add Reminder":
 
 elif menu == "View Reminders":
     st.subheader("All Reminders")
+
     if not reminders:
         st.info("No reminders added yet.")
     else:
         for reminder in reminders:
-            with st.expander(f"🧑 {reminder['name']} - {reminder['medicine']}"):
-                st.write(f"🧾 Dosage: {reminder['dosage']}")
-                st.write(f"⏰ Scheduled: {reminder['datetime']}")
-                
-                if st.button(f"Delete", key=f"del_{reminder['id']}"):
-                    reminders = [r for r in reminders if r["id"] != reminder["id"]]
-                    save_reminders(reminders)
-                    st.rerun()
+            st.markdown(f"""
+            ### 🧑 {reminder['name']}
+            - 💊 Medicine: {reminder['medicine']}
+            - 🧾 Dosage: {reminder['dosage']}
+            - ⏰ Date & Time: {reminder['datetime']}
+            """)
+
+            if st.button(f"Delete {reminder['id']}"):
+                reminders = [r for r in reminders if r["id"] != reminder["id"]]
+                save_reminders(reminders)
+                st.warning("Reminder deleted.")
+                st.experimental_rerun()
